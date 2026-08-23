@@ -35,14 +35,14 @@ function attachment(type: string, extra: Record<string, unknown> = {}): Message 
   } as unknown as Message
 }
 
-test('isLoggableMessage filters prefix-cache listing deltas for external users (privacy boundary)', () => {
+test('isLoggableMessage keeps prefix-cache listing deltas for external users (cache-hit)', () => {
   process.env.USER_TYPE = 'external'
 
-  // P1-1: these listing deltas carry sensitive payloads (skill descriptions,
-  // custom agent whenToUse/tool policy, server-provided MCP instructions).
-  // They must NOT be persisted to the external transcript / remote ingress.
-  // Prefix-cache resume stability uses a separate local resume-cache that
-  // stores the full listing payloads on disk only (never via isLoggableMessage).
+  // Prefix-cache critical listing deltas are kept in the transcript so
+  // --resume rebuilds the same announced set and the OpenAI / Moonshot
+  // automatic prefix cache stays byte-stable (max cache-hit). They carry only
+  // local catalogs (no user message content); unrelated attachments stay
+  // filtered by the privacy boundary.
   expect(
     isLoggableMessage(
       attachment('skill_listing', {
@@ -51,7 +51,7 @@ test('isLoggableMessage filters prefix-cache listing deltas for external users (
         isInitial: true,
       }),
     ),
-  ).toBe(false)
+  ).toBe(true)
   expect(
     isLoggableMessage(
       attachment('agent_listing_delta', {
@@ -62,7 +62,7 @@ test('isLoggableMessage filters prefix-cache listing deltas for external users (
         showConcurrencyNote: true,
       }),
     ),
-  ).toBe(false)
+  ).toBe(true)
   expect(
     isLoggableMessage(
       attachment('deferred_tools_delta', {
@@ -71,7 +71,7 @@ test('isLoggableMessage filters prefix-cache listing deltas for external users (
         removedNames: [],
       }),
     ),
-  ).toBe(false)
+  ).toBe(true)
   expect(
     isLoggableMessage(
       attachment('mcp_instructions_delta', {
@@ -80,7 +80,7 @@ test('isLoggableMessage filters prefix-cache listing deltas for external users (
         removedNames: [],
       }),
     ),
-  ).toBe(false)
+  ).toBe(true)
 })
 
 test('isLoggableMessage still filters unrelated attachments for external users', () => {

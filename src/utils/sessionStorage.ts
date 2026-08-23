@@ -5361,12 +5361,12 @@ export function isLoggableMessage(m: Message): boolean {
   // user-configured hook output that is useful for session context on resume.
   //
   // Prefix-cache critical listing deltas (skill_listing, agent_listing_delta,
-  // deferred_tools_delta, mcp_instructions_delta) carry LOCAL catalogs:
-  // skill descriptions, custom agent whenToUse/tool policy, deferred tool names,
-  // and server-provided MCP InitializeResult.instructions. Persisting them into
-  // the external transcript breaks the privacy boundary above, so they stay
-  // filtered. Prefix-cache resume stability is handled by a separate local
-  // resume-cache mechanism (no sensitive payload in the public transcript).
+  // deferred_tools_delta, mcp_instructions_delta) are KEPT in the transcript.
+  // They carry local catalogs, but stripping them forces --resume to rebuild an
+  // empty announced set and re-inject those catalogs mid-history, busting the
+  // OpenAI / Moonshot automatic prefix cache. Keeping them makes the prefix
+  // byte-stable across resume (max cache-hit rate). They contain only local
+  // descriptions (no user message content) and are not sent to external sinks.
   if (m.type === 'attachment' && getUserType() !== 'ant') {
     // Legacy / corrupt transcripts may carry null or non-object attachment
     // payloads. Fail closed (do not log) rather than throwing on .type.
@@ -5377,6 +5377,14 @@ export function isLoggableMessage(m: Message): boolean {
     if (
       t === 'hook_additional_context' &&
       isEnvTruthy(process.env.CLAUDE_CODE_SAVE_HOOK_ADDITIONAL_CONTEXT)
+    ) {
+      return true
+    }
+    if (
+      t === 'skill_listing' ||
+      t === 'agent_listing_delta' ||
+      t === 'deferred_tools_delta' ||
+      t === 'mcp_instructions_delta'
     ) {
       return true
     }
