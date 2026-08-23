@@ -33,7 +33,6 @@ import {
 import { COMMAND_NAME_TAG, TICK_TAG } from '../constants/xml.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../services/analytics/growthbook.js'
 import * as sessionIngress from '../services/api/sessionIngress.js'
-import { REPL_TOOL_NAME } from '../tools/REPLTool/constants.js'
 import {
   type AgentId,
   asAgentId,
@@ -5355,136 +5354,29 @@ export async function loadAllSubagentTranscriptsFromDisk(): Promise<{
 // without awaiting recordTranscript's return value (race-free hint tracking).
 export function isLoggableMessage(m: Message): boolean {
   if (m.type === 'progress') return false
-  // IMPORTANT: We deliberately filter out most attachments for non-ants because
-  // they have sensitive info for training that we don't want exposed to the public.
-  // When enabled, we allow hook_additional_context through since it contains
-  // user-configured hook output that is useful for session context on resume.
-  //
-  // Prefix-cache critical listing deltas (skill_listing, agent_listing_delta,
-  // deferred_tools_delta, mcp_instructions_delta) are KEPT in the transcript.
-  // They carry local catalogs, but stripping them forces --resume to rebuild an
-  // empty announced set and re-inject those catalogs mid-history, busting the
-  // OpenAI / Moonshot automatic prefix cache. Keeping them makes the prefix
-  // byte-stable across resume (max cache-hit rate). They contain only local
-  // descriptions (no user message content) and are not sent to external sinks.
-  if (m.type === 'attachment' && getUserType() !== 'ant') {
+  // Max cache-hit: keep ALL attachments in the transcript. The fork runs
+  // locally against Moonshot / OpenAI-compatible providers with no external
+  // transcript sink, so the upstream privacy boundary (strip non-ant
+  // attachments) only made --resume rebuild a DIFFERENT history than the
+  // live request, busting the automatic prefix cache. Keeping the exact
+  // request history keeps the prefix byte-stable across resume. Fail closed
+  // only on malformed payloads that would crash downstream processing.
+  if (m.type === 'attachment') {
     // Legacy / corrupt transcripts may carry null or non-object attachment
-    // payloads. Fail closed (do not log) rather than throwing on .type.
+    // payloads. Fail closed (do not log) rather than throwing downstream.
     if (!m.attachment || typeof m.attachment !== 'object') {
       return false
     }
-    const t = m.attachment.type
-    if (
-      t === 'hook_additional_context' &&
-      isEnvTruthy(process.env.CLAUDE_CODE_SAVE_HOOK_ADDITIONAL_CONTEXT)
-    ) {
-      return true
-    }
-    if (
-      t === 'skill_listing' ||
-      t === 'agent_listing_delta' ||
-      t === 'deferred_tools_delta' ||
-      t === 'mcp_instructions_delta'
-    ) {
-      return true
-    }
-    return false
   }
   return true
 }
 
-function collectReplIds(messages: readonly Message[]): Set<string> {
-  const ids = new Set<string>()
-  for (const m of messages) {
-    if (m.type === 'assistant' && Array.isArray(m.message.content)) {
-      for (const b of m.message.content) {
-        if (b.type === 'tool_use' && b.name === REPL_TOOL_NAME) {
-          ids.add(b.id)
-        }
-      }
-    }
-  }
-  return ids
-}
-
-/**
- * For external users, make REPL invisible in the persisted transcript: strip
- * REPL tool_use/tool_result pairs and promote isVirtual messages to real. On
- * --resume the model then sees a coherent native-tool-call history (assistant
- * called Bash, got result, called Read, got result) without the REPL wrapper.
- * Ant transcripts keep the wrapper so /share training data sees REPL usage.
- *
- * replIds is pre-collected from the FULL session array, not the slice being
- * transformed — recordTranscript receives incremental slices where the REPL
- * tool_use (earlier render) and its tool_result (later render, after async
- * execution) land in separate calls. A fresh per-call Set would miss the id
- * and leave an orphaned tool_result on disk.
- */
-function transformMessagesForExternalTranscript(
-  messages: Transcript,
-  replIds: Set<string>,
-): Transcript {
-  return messages.flatMap(m => {
-    if (m.type === 'assistant' && Array.isArray(m.message.content)) {
-      const content = m.message.content
-      const hasRepl = content.some(
-        b => b.type === 'tool_use' && b.name === REPL_TOOL_NAME,
-      )
-      const filtered = hasRepl
-        ? content.filter(
-            b => !(b.type === 'tool_use' && b.name === REPL_TOOL_NAME),
-          )
-        : content
-      if (filtered.length === 0) return []
-      if (m.isVirtual) {
-        const { isVirtual: _omit, ...rest } = m
-        return [{ ...rest, message: { ...m.message, content: filtered } }]
-      }
-      if (filtered !== content) {
-        return [{ ...m, message: { ...m.message, content: filtered } }]
-      }
-      return [m]
-    }
-    if (m.type === 'user' && Array.isArray(m.message.content)) {
-      const content = m.message.content
-      const hasRepl = content.some(
-        b => b.type === 'tool_result' && replIds.has(b.tool_use_id),
-      )
-      const filtered = hasRepl
-        ? content.filter(
-            b => !(b.type === 'tool_result' && replIds.has(b.tool_use_id)),
-          )
-        : content
-      if (filtered.length === 0) return []
-      if (m.isVirtual) {
-        const { isVirtual: _omit, ...rest } = m
-        return [{ ...rest, message: { ...m.message, content: filtered } }]
-      }
-      if (filtered !== content) {
-        return [{ ...m, message: { ...m.message, content: filtered } }]
-      }
-      return [m]
-    }
-    // string-content user, system, attachment
-    if ('isVirtual' in m && m.isVirtual) {
-      const { isVirtual: _omit, ...rest } = m
-      return [rest]
-    }
-    return [m]
-  }) as Transcript
-}
-
 export function cleanMessagesForLogging(
   messages: Message[],
+  // Kept for API compatibility: callers pass the full array as context.
   allMessages: readonly Message[] = messages,
 ): Transcript {
-  const filtered = messages.filter(isLoggableMessage) as Transcript
-  return getUserType() !== 'ant'
-    ? transformMessagesForExternalTranscript(
-        filtered,
-        collectReplIds(allMessages),
-      )
-    : filtered
+  return messages.filter(isLoggableMessage) as Transcript
 }
 
 /**

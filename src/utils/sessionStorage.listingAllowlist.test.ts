@@ -35,14 +35,12 @@ function attachment(type: string, extra: Record<string, unknown> = {}): Message 
   } as unknown as Message
 }
 
-test('isLoggableMessage keeps prefix-cache listing deltas for external users (cache-hit)', () => {
+test('isLoggableMessage keeps prefix-cache listing deltas (cache-hit)', () => {
   process.env.USER_TYPE = 'external'
 
-  // Prefix-cache critical listing deltas are kept in the transcript so
-  // --resume rebuilds the same announced set and the OpenAI / Moonshot
-  // automatic prefix cache stays byte-stable (max cache-hit). They carry only
-  // local catalogs (no user message content); unrelated attachments stay
-  // filtered by the privacy boundary.
+  // Listing deltas carry only local catalogs. Keeping them in the transcript
+  // lets --resume rebuild the same announced set so the OpenAI / Moonshot
+  // automatic prefix cache stays byte-stable (max cache-hit).
   expect(
     isLoggableMessage(
       attachment('skill_listing', {
@@ -83,32 +81,18 @@ test('isLoggableMessage keeps prefix-cache listing deltas for external users (ca
   ).toBe(true)
 })
 
-test('isLoggableMessage still filters unrelated attachments for external users', () => {
+test('isLoggableMessage keeps file and hook attachments for cache-hit', () => {
   process.env.USER_TYPE = 'external'
   delete process.env.CLAUDE_CODE_SAVE_HOOK_ADDITIONAL_CONTEXT
 
+  // All attachments (including @mention files and hook output) stay in the
+  // transcript so --resume re-sends the exact request history and keeps the
+  // prefix cache byte-stable.
   expect(
     isLoggableMessage(
       attachment('file', { filename: '/tmp/secret.txt', content: 'nope' }),
     ),
-  ).toBe(false)
-  expect(
-    isLoggableMessage(
-      attachment('hook_additional_context', {
-        content: ['hook output'],
-        hookName: 'SessionStart',
-        toolName: undefined,
-        toolUseID: undefined,
-        hookEvent: 'SessionStart',
-      }),
-    ),
-  ).toBe(false)
-})
-
-test('isLoggableMessage keeps hook_additional_context behind its env gate', () => {
-  process.env.USER_TYPE = 'external'
-  process.env.CLAUDE_CODE_SAVE_HOOK_ADDITIONAL_CONTEXT = '1'
-
+  ).toBe(true)
   expect(
     isLoggableMessage(
       attachment('hook_additional_context', {
@@ -122,7 +106,7 @@ test('isLoggableMessage keeps hook_additional_context behind its env gate', () =
   ).toBe(true)
 })
 
-test('isLoggableMessage allows all attachments for ant users', () => {
+test('isLoggableMessage keeps all attachments for ant users', () => {
   process.env.USER_TYPE = 'ant'
 
   expect(
@@ -130,8 +114,6 @@ test('isLoggableMessage allows all attachments for ant users', () => {
       attachment('file', { filename: '/tmp/x.txt', content: 'x' }),
     ),
   ).toBe(true)
-  // ant (first-party) sessions keep listing deltas in the transcript: the
-  // privacy boundary only applies to external users.
   expect(
     isLoggableMessage(
       attachment('mcp_instructions_delta', {
@@ -154,7 +136,7 @@ test('isLoggableMessage allows all attachments for ant users', () => {
   ).toBe(true)
 })
 
-test('isLoggableMessage fails closed on malformed null attachment for external users', () => {
+test('isLoggableMessage fails closed on malformed null attachment', () => {
   process.env.USER_TYPE = 'external'
   const malformed = {
     type: 'attachment',
