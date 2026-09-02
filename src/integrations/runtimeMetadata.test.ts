@@ -16,6 +16,7 @@ import {
   getDiscoveryCacheKey,
   getRouteDiscoveryHeaders,
 } from './discoveryService'
+import { resolveActiveRouteIdFromEnv } from './routeMetadata.js'
 import { setClaudeConfigHomeDirForTesting } from '../utils/envUtils.js'
 import glmBrand from './brands/glm.js'
 import glmModels from './models/glm.js'
@@ -24,6 +25,53 @@ import zaiVendor from './vendors/zai.js'
 const originalConfigDir = process.env.CLAUDE_CONFIG_DIR
 
 describe('Z.AI GLM-5.3 descriptor contract', () => {
+  it('wires the verified GLM-5.3-Flash descriptor and direct catalog contract', () => {
+    const model = glmModels.find(candidate => candidate.id === 'glm-5.3-flash')
+    expect(model).toMatchObject({
+      id: 'glm-5.3-flash',
+      label: 'GLM 5.3 Flash',
+      vendorId: 'zai',
+      brandId: 'glm',
+      classification: ['chat', 'reasoning', 'vision', 'coding'],
+      defaultModel: 'glm-5.3-flash',
+      contextWindow: 1_000_000,
+      maxOutputTokens: 131_072,
+      runtimeMetadataScope: 'catalog',
+      capabilities: {
+        supportsVision: true,
+        supportsStreaming: true,
+        supportsFunctionCalling: true,
+        supportsJsonMode: true,
+        supportsReasoning: true,
+        supportsPreciseTokenCount: false,
+      },
+    })
+
+    expect(glmBrand.modelIds?.[0]).toBe('glm-5.3-flash')
+    expect(glmBrand.modelIds?.[1]).toBe('glm-5.3')
+
+    const catalogEntries = zaiVendor.catalog?.models ?? []
+    const flashEntries = catalogEntries.filter(entry => entry.id === 'glm-5.3-flash')
+    expect(flashEntries).toHaveLength(1)
+    expect(catalogEntries[0]).toMatchObject({
+      id: 'glm-5.3-flash',
+      apiName: 'glm-5.3-flash',
+      label: 'GLM-5.3-Flash',
+      modelDescriptorId: 'glm-5.3-flash',
+      reasoning: {
+        mode: 'levels',
+        levels: ['low', 'high', 'xhigh'],
+        wireFormat: 'zai_compatible',
+      },
+      transportOverrides: {
+        openaiShim: { enableToolStreaming: true },
+      },
+    })
+    expect(catalogEntries[1]?.id).toBe('glm-5.3')
+    expect(zaiVendor.catalog?.source).toBe('static')
+    expect(zaiVendor.defaultModel).toBe('glm-5.2')
+  })
+
   it('wires the verified shared model, brand, and direct catalog entry without changing the default', () => {
     const model = glmModels.find(candidate => candidate.id === 'glm-5.3')
     expect(model).toMatchObject({
@@ -45,9 +93,9 @@ describe('Z.AI GLM-5.3 descriptor contract', () => {
         supportsPreciseTokenCount: false,
       },
     })
-    expect(glmBrand.modelIds?.[0]).toBe('glm-5.3')
+    expect(glmBrand.modelIds).toContain('glm-5.3')
 
-    const catalogEntry = zaiVendor.catalog?.models?.[0]
+    const catalogEntry = zaiVendor.catalog?.models?.find(entry => entry.id === 'glm-5.3')
     expect(catalogEntry).toMatchObject({
       id: 'glm-5.3',
       apiName: 'glm-5.3',
@@ -167,6 +215,66 @@ describe('resolveModelRuntimeLimits', () => {
     })
   })
   it.each([
+    'glm-5.3-flash',
+    'glm-5.3-flash?reasoning=low',
+    'glm-5.3-flash?reasoning=high',
+    'glm-5.3-flash?reasoning=xhigh',
+    'glm-5.3-flash?thinking=disabled',
+  ])('uses verified Z.AI GLM-5.3-Flash runtime limits for %s', model => {
+    const limits = resolveModelRuntimeLimits({
+      model,
+      processEnv: {
+        CLAUDE_CODE_USE_OPENAI: '1',
+        OPENAI_BASE_URL: 'https://api.z.ai/api/coding/paas/v4',
+      },
+    })
+
+    expect(limits.contextWindow).toBe(1_000_000)
+    expect(limits.maxOutputTokens).toBe(131_072)
+  })
+
+  it('does not apply Coding Plan Flash limits on the same-host general Z.AI endpoint', () => {
+    const processEnv = {
+      CLAUDE_CODE_USE_OPENAI: '1',
+      OPENAI_BASE_URL: 'https://api.z.ai/api/paas/v4',
+    }
+
+    expect(resolveActiveRouteIdFromEnv(processEnv)).toBe('custom')
+    expect(resolveModelRuntimeLimits({
+      model: 'glm-5.3-flash',
+      activeProfileProvider: 'zai',
+      processEnv,
+    })).toEqual({
+      contextWindow: undefined,
+      maxOutputTokens: undefined,
+    })
+  })
+
+  it.each([' ', 'undefined', 'null'])(
+    'falls back from invalid OPENAI_BASE_URL %j to OPENAI_API_BASE for route limits',
+    invalidPrimary => {
+      const processEnv = {
+        CLAUDE_CODE_USE_OPENAI: '1',
+        OPENAI_BASE_URL: invalidPrimary,
+        OPENAI_API_BASE: 'https://api.z.ai/api/coding/paas/v4',
+      }
+
+      expect(resolveActiveRouteIdFromEnv(processEnv, {
+        activeProfileProvider: 'zai',
+        activeProfileBaseUrl: 'https://api.z.ai/api/coding/paas/v4',
+      })).toBe('zai')
+      expect(resolveModelRuntimeLimits({
+        model: 'glm-5.3-flash',
+        activeProfileProvider: 'zai',
+        processEnv,
+      })).toEqual({
+        contextWindow: 1_000_000,
+        maxOutputTokens: 131_072,
+      })
+    },
+  )
+
+  it.each([
     'glm-5.3',
     'glm-5.3?reasoning=low',
     'glm-5.3?reasoning=xhigh',
@@ -197,22 +305,43 @@ describe('resolveModelRuntimeLimits', () => {
   })
 
   it.each([
-    ['NVIDIA NIM', 'https://integrate.api.nvidia.com/v1', { NVIDIA_NIM: '1' }],
-    ['OpenRouter', 'https://openrouter.ai/api/v1', { CLAUDE_CODE_USE_OPENAI: '1' }],
-    ['custom endpoint', 'https://proxy.example.test/v1', { CLAUDE_CODE_USE_OPENAI: '1' }],
-  ] as const)('does not leak direct Z.AI GLM-5.3 limits onto %s', (_name, baseUrl, routeEnv) => {
+    ['NVIDIA NIM', 'https://integrate.api.nvidia.com/v1', { CLAUDE_CODE_USE_OPENAI: '1', NVIDIA_NIM: '1' }, 'nvidia-nim'],
+    ['OpenRouter', 'https://openrouter.ai/api/v1', { CLAUDE_CODE_USE_OPENAI: '1' }, 'openrouter'],
+    ['custom endpoint', 'https://proxy.example.test/v1', { CLAUDE_CODE_USE_OPENAI: '1' }, 'custom'],
+  ] as const)('does not leak direct Z.AI GLM-5.3-Flash limits onto %s', (_name, baseUrl, routeEnv, expectedRoute) => {
+    const processEnv = {
+      ...routeEnv,
+      OPENAI_BASE_URL: baseUrl,
+    }
+    expect(resolveActiveRouteIdFromEnv(processEnv)).toBe(expectedRoute)
     expect(resolveModelRuntimeLimits({
-      model: 'glm-5.3',
-      processEnv: {
-        ...routeEnv,
-        OPENAI_BASE_URL: baseUrl,
-      },
+      model: 'glm-5.3-flash',
+      processEnv,
     })).toEqual({
       contextWindow: undefined,
       maxOutputTokens: undefined,
     })
   })
-  it('uses the applied provider profile route before generic custom base URL fallback', () => {
+
+  it.each([
+    ['NVIDIA NIM', 'https://integrate.api.nvidia.com/v1', { CLAUDE_CODE_USE_OPENAI: '1', NVIDIA_NIM: '1' }, 'nvidia-nim'],
+    ['OpenRouter', 'https://openrouter.ai/api/v1', { CLAUDE_CODE_USE_OPENAI: '1' }, 'openrouter'],
+    ['custom endpoint', 'https://proxy.example.test/v1', { CLAUDE_CODE_USE_OPENAI: '1' }, 'custom'],
+  ] as const)('does not leak direct Z.AI GLM-5.3 limits onto %s', (_name, baseUrl, routeEnv, expectedRoute) => {
+    const processEnv = {
+      ...routeEnv,
+      OPENAI_BASE_URL: baseUrl,
+    }
+    expect(resolveActiveRouteIdFromEnv(processEnv)).toBe(expectedRoute)
+    expect(resolveModelRuntimeLimits({
+      model: 'glm-5.3',
+      processEnv,
+    })).toEqual({
+      contextWindow: undefined,
+      maxOutputTokens: undefined,
+    })
+  })
+  it('uses generic limits when an explicit custom URL overrides the applied profile route', () => {
     expect(
       resolveModelRuntimeLimits({
         model: 'kimi-k2.6',
@@ -223,7 +352,7 @@ describe('resolveModelRuntimeLimits', () => {
           OPENAI_BASE_URL: 'https://proxy.example.test/v1',
         },
       }),
-    ).toEqual({ contextWindow: 262_144, maxOutputTokens: 65_536 })
+    ).toEqual({ contextWindow: 262_144, maxOutputTokens: 32_768 })
   })
 
   it('preserves composite provider paths before generic last-segment fallbacks', () => {
@@ -290,6 +419,24 @@ describe('resolveModelRuntimeLimits', () => {
         }).contextWindow,
       ).toBe(2_000_000)
     })
+  })
+})
+
+describe('LLMTR runtime attribution', () => {
+  it('keeps query-bearing endpoints on the generic custom transport', () => {
+    const result = resolveOpenAIShimRuntimeContext({
+      activeProfileProvider: 'llmtr',
+      baseUrl: 'https://llmtr.com/v1?tenant=proxy',
+      model: 'proxy-model',
+      processEnv: {
+        CLAUDE_CODE_USE_OPENAI: '1',
+        OPENAI_API_FORMAT: 'responses',
+      },
+    })
+
+    expect(result.routeId).not.toBe('llmtr')
+    expect(result.openaiShimConfig.requiredApiFormat).toBeUndefined()
+    expect(result.openaiShimConfig.maxTokensField).toBeUndefined()
   })
 })
 
@@ -410,6 +557,42 @@ describe('resolveOpenAIShimRuntimeContext - Z.A.I GLM-5.3', () => {
     expect(result.openaiShimConfig.maxTokensField).toBe('max_tokens')
     expect(result.openaiShimConfig.removeBodyFields).toContain('store')
     expect(result.openaiShimConfig.enableToolStreaming).toBe(true)
+  })
+})
+
+describe('resolveOpenAIShimRuntimeContext - Z.A.I GLM-5.3-Flash', () => {
+  it.each([
+    'glm-5.3-flash',
+    'glm-5.3-flash?reasoning=xhigh',
+    'glm-5.3-flash?thinking=disabled',
+  ])('uses the explicit direct-route GLM-5.3-Flash contract for %s', model => {
+    const result = resolveOpenAIShimRuntimeContext({
+      model,
+      baseUrl: 'https://api.z.ai/api/coding/paas/v4',
+      processEnv: {},
+    })
+
+    expect(result.routeId).toBe('zai')
+    expect(result.catalogEntry?.id).toBe('glm-5.3-flash')
+    expect(result.openaiShimConfig.thinkingRequestFormat).toBe('zai-compatible')
+    expect(result.openaiShimConfig.preserveReasoningContent).toBe(true)
+    expect(result.openaiShimConfig.requireReasoningContentOnAssistantMessages).toBe(true)
+    expect(result.openaiShimConfig.maxTokensField).toBe('max_tokens')
+    expect(result.openaiShimConfig.removeBodyFields).toContain('store')
+    expect(result.openaiShimConfig.enableToolStreaming).toBe(true)
+  })
+
+  it('does not apply the Coding Plan catalog entry on the same-host general endpoint', () => {
+    const result = resolveOpenAIShimRuntimeContext({
+      model: 'glm-5.3-flash',
+      baseUrl: 'https://api.z.ai/api/paas/v4',
+      activeProfileProvider: 'zai',
+      processEnv: { CLAUDE_CODE_USE_OPENAI: '1' },
+    })
+
+    expect(result.routeId).toBe('custom')
+    expect(result.catalogEntry).toBeNull()
+    expect(result.openaiShimConfig.enableToolStreaming).toBe(false)
   })
 })
 
@@ -935,6 +1118,32 @@ describe('resolveOpenAIShimRuntimeContext - xAI catalog metadata', () => {
 })
 
 describe('resolveOpenAIShimRuntimeContext - provider override route preference', () => {
+  it('uses the resolved request route for provider-override runtime limits', () => {
+    const processEnv = {
+      ANTHROPIC_BASE_URL: 'https://api.anthropic.com',
+      ANTHROPIC_MODEL: 'claude-sonnet-4-6',
+    }
+
+    expect(resolveModelRuntimeLimits({
+      model: 'glm-5.3-flash',
+      baseUrl: 'https://api.z.ai/api/coding/paas/v4',
+      resolvedRouteId: 'zai',
+      processEnv,
+    })).toEqual({
+      contextWindow: 1_000_000,
+      maxOutputTokens: 131_072,
+    })
+    expect(resolveModelRuntimeLimits({
+      model: 'glm-5.3-flash',
+      baseUrl: 'https://custom.example.test/v1',
+      resolvedRouteId: null,
+      processEnv,
+    })).toEqual({
+      contextWindow: undefined,
+      maxOutputTokens: undefined,
+    })
+  })
+
   it('does not inherit ambient route config when the preferred base URL is unrecognized', () => {
     const result = resolveOpenAIShimRuntimeContext({
       model: 'gpt-4o',
@@ -1142,5 +1351,44 @@ describe('resolveOpenAIShimRuntimeContext - segment-boundary heuristic', () => {
         },
       }).contextWindow,
     ).toBe(262_144)
+  })
+
+  it('preserves OpenGateway maxTokensField wire contract for live-only inferred models', () => {
+    for (const model of ['moonshotai/kimi-k3', 'deepseek/deepseek-r1', 'z-ai/glm-5.2']) {
+      const result = resolveOpenAIShimRuntimeContext({
+        baseUrl: 'https://opengateway.gitlawb.com/v1',
+        model,
+        processEnv: { CLAUDE_CODE_USE_OPENAI: '1' },
+      })
+      expect(result.routeId).toBe('gitlawb-opengateway')
+      expect(result.openaiShimConfig.maxTokensField).toBe('max_completion_tokens')
+      expect(result.openaiShimConfig.preserveReasoningContent).toBe(true)
+    }
+  })
+
+  it('prefers explicit descriptor and catalog openaiShim overrides over inferred settings and merges removeBodyFields', () => {
+    // Inferred GLM shim defaults maxTokensField to 'max_tokens' and removeBodyFields to ['store'].
+    // OpenGateway route descriptor explicitly sets maxTokensField to 'max_completion_tokens'
+    // and removeBodyFields to ['store', 'stream_options'].
+    const opengatewayGlm = resolveOpenAIShimRuntimeContext({
+      baseUrl: 'https://opengateway.gitlawb.com/v1',
+      model: 'z-ai/glm-5.2',
+      processEnv: { CLAUDE_CODE_USE_OPENAI: '1' },
+    })
+    expect(opengatewayGlm.openaiShimConfig.maxTokensField).toBe('max_completion_tokens')
+    expect(opengatewayGlm.openaiShimConfig.removeBodyFields).toEqual([
+      'store',
+      'stream_options',
+    ])
+    expect(opengatewayGlm.openaiShimConfig.preserveReasoningContent).toBe(true)
+
+    // Atlas Cloud grok-build-0.1 catalog entry explicitly sets removeBodyFields: ['reasoning_effort']
+    // which merges with any route-level settings.
+    const atlasGrok = resolveOpenAIShimRuntimeContext({
+      baseUrl: 'https://api.atlascloud.ai/v1',
+      model: 'xai/grok-build-0.1',
+      processEnv: { CLAUDE_CODE_USE_OPENAI: '1' },
+    })
+    expect(atlasGrok.openaiShimConfig.removeBodyFields).toContain('reasoning_effort')
   })
 })
